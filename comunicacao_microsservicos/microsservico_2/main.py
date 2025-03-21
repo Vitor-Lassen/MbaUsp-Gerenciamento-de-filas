@@ -26,17 +26,18 @@ async def process_incoming_message(message: aio_pika.IncomingMessage):
     - Decodifica o JSON e extrai os dados do usuário.
     - Insere o usuário no banco de dados.
     """
-    message.ack()  # Confirma o recebimento da mensagem
+
     body = message.body
     logger.info("Received message")
 
     if body:
         parsed_message = json.loads(body)
-        created_user = parsed_message['usuario']
-
-        # Obtém uma sessão do banco de dados
         session: Session = next(get_session())  
         try:
+            created_user = parsed_message['usuario']
+
+            # Obtém uma sessão do banco de dados
+        
             # Cria um novo usuário com os dados da mensagem
             user_model = UsuarioModel(
                 id=created_user['id'],
@@ -47,13 +48,27 @@ async def process_incoming_message(message: aio_pika.IncomingMessage):
             session.add(user_model)
             session.commit()
             logger.info(f"Usuário {user_model.id} criado com sucesso.")
+            await   message.ack()  # Confirma o recebimento da mensagem
         except Exception as e:
             session.rollback()
             logger.error(f"Erro ao processar mensagem: {str(e)}")
+            await push_dead_queue( message.body)
+            await message.ack()
         finally:
             session.close()
-        
+    
         logger.info(f"Message content: {parsed_message}")
+
+async def push_dead_queue(message:str):
+    connection = await aio_pika.connect_robust(RABBITMQ_URL)
+    async with connection:
+        channel = await connection.channel()
+        await channel.default_exchange.publish(
+            aio_pika.Message(body= message),
+            routing_key=f"{QUEUE_NAME}.error"
+        )
+    logger.info("sent to dead queue ")
+    
 
 async def consume(loop):
     """
@@ -65,7 +80,8 @@ async def consume(loop):
     try:
         connection = await aio_pika.connect_robust(RABBITMQ_URL, loop=loop)
         channel = await connection.channel()
-        queue = await channel.declare_queue(QUEUE_NAME)
+        queue = await channel.declare_queue(QUEUE_NAME)       
+        deadqueue = await channel.declare_queue(f"{QUEUE_NAME}.error")
         await queue.consume(process_incoming_message, no_ack=False)
         logger.info("Waiting for messages...")
         return connection
